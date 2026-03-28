@@ -115,18 +115,18 @@ def filter_data(df, option):
 if page == "Tasks":
     st.title("✅ Tasks")
 
-    with st.form("task_form", clear_on_submit=False):
+    with st.form("task_form", clear_on_submit=True):
 
-        title = st.text_input("Title", key="task_title")
-        desc = st.text_area("Description", key="task_desc")
-        task_type = st.selectbox("Type", ["Personal","Office"], key="task_type")
-        project = st.text_input("Project (optional)", key="task_project")
-        priority = st.selectbox("Priority",["High","Medium","Low"], key="task_priority")
-        deadline = st.date_input("Deadline", key="task_deadline")
-        est_time = st.number_input("Hours",0.5,24.0,1.0, key="task_time")
-
+        title = st.text_input("Title")
+        desc = st.text_area("Description")
+        task_type = st.selectbox("Type", ["Personal","Office"])
+        project = st.text_input("Project (optional)")
+        priority = st.selectbox("Priority",["High","Medium","Low"])
+        deadline = st.date_input("Deadline")
+        est_time = st.number_input("Hours",0.5,24.0,1.0)
+    
         submitted = st.form_submit_button("Add Task")
-
+    
         if submitted and title:
             new = pd.DataFrame([{
                 "id": len(tasks)+1,
@@ -142,10 +142,15 @@ if page == "Tasks":
                 "category": "General",
                 "created_at": str(datetime.now())
             }])
-
-            tasks = pd.concat([tasks,new],ignore_index=True)
+    
+            new = new.reindex(columns=tasks.columns, fill_value="")
+    
+            if tasks.empty:
+                tasks = new.copy()
+            else:
+                tasks = pd.concat([tasks, new], ignore_index=True)
+    
             save_tasks(tasks)
-
             st.success("Task Added")
 
             # RESET

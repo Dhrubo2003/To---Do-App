@@ -1,219 +1,211 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 import plotly.express as px
 import os
-import time
 
-# -------------------- CONFIG --------------------
-st.set_page_config(page_title="Smart Productivity OS", layout="wide")
+st.set_page_config(page_title="Productivity OS", layout="wide")
 
-FILE = "tasks.xlsx"
+FILE = "data.xlsx"
 
-# -------------------- INIT EXCEL --------------------
+# ------------------ INIT EXCEL ------------------
 def init_file():
     if not os.path.exists(FILE):
-        df = pd.DataFrame(columns=[
-            "ID","Task","Category","Priority","Status",
-            "Date","Deadline","Time_Est","Time_Spent",
-            "Type","Score"
+        tasks = pd.DataFrame(columns=[
+            "id","title","desc","priority","deadline",
+            "est_time","actual_time","status",
+            "category","created_at"
         ])
-        df.to_excel(FILE, index=False)
-
-init_file()
+        habits = pd.DataFrame(columns=[
+            "id","name","streak","last_done","consistency"
+        ])
+        with pd.ExcelWriter(FILE) as writer:
+            tasks.to_excel(writer, sheet_name="tasks", index=False)
+            habits.to_excel(writer, sheet_name="habits", index=False)
 
 def load_data():
-    return pd.read_excel(FILE)
+    tasks = pd.read_excel(FILE, sheet_name="tasks")
+    habits = pd.read_excel(FILE, sheet_name="habits")
+    return tasks, habits
 
-def save_data(df):
-    df.to_excel(FILE, index=False)
+def save_data(tasks, habits):
+    with pd.ExcelWriter(FILE, engine='openpyxl', mode='w') as writer:
+        tasks.to_excel(writer, sheet_name="tasks", index=False)
+        habits.to_excel(writer, sheet_name="habits", index=False)
 
-# -------------------- SMART CATEGORY --------------------
-def auto_category(task):
-    task = task.lower()
-    if "gym" in task or "workout" in task:
+init_file()
+tasks, habits = load_data()
+
+# ------------------ SIDEBAR ------------------
+st.sidebar.title("⚡ Productivity OS")
+page = st.sidebar.radio("Navigate", [
+    "Dashboard","Tasks","Habits","Planner","Insights","AI Review"
+])
+
+# ------------------ HELPERS ------------------
+
+def priority_score(row):
+    if pd.isna(row["deadline"]):
+        return 0
+    days_left = (pd.to_datetime(row["deadline"]) - datetime.now()).days
+    urgency = max(0, 10 - days_left)
+    importance = {"High":10,"Medium":5,"Low":2}.get(row["priority"],5)
+    effort = row["est_time"] if not pd.isna(row["est_time"]) else 1
+    return urgency*0.4 + importance*0.3 - effort*0.2
+
+def categorize(text):
+    text = str(text).lower()
+    if "gym" in text or "run" in text:
         return "Health"
-    elif "meeting" in task or "client" in task:
+    if "meeting" in text or "client" in text:
         return "Work"
-    elif "study" in task or "learn" in task:
+    if "read" in text or "study" in text:
         return "Learning"
-    else:
-        return "General"
+    return "Personal"
 
-# -------------------- PRIORITY ENGINE --------------------
-def compute_priority(deadline, created_time):
-    now = datetime.now()
-    score = 0
+# ------------------ DASHBOARD ------------------
+if page == "Dashboard":
+    st.title("📊 Dashboard")
 
-    if pd.notna(deadline):
-        diff = (pd.to_datetime(deadline) - now).days
-        score += max(0, 10 - diff)
+    if len(tasks) > 0:
+        completed = len(tasks[tasks["status"]=="Done"])
+        total = len(tasks)
+        completion_rate = completed/total if total>0 else 0
 
-    age = (now - created_time).days
-    score += age
+        on_time = len(tasks[(tasks["status"]=="Done") & 
+                   (pd.to_datetime(tasks["deadline"]) >= pd.to_datetime(tasks["created_at"]))])
+        on_time_rate = on_time/total if total>0 else 0
 
-    if score >= 10:
-        return "Critical"
-    elif score >= 5:
-        return "Important"
-    else:
-        return "Optional"
+        focus_hours = tasks["actual_time"].sum() if "actual_time" in tasks else 0
 
-# -------------------- DARK UI --------------------
-st.markdown("""
-<style>
-body {
-    background-color: #0e1117;
-    color: white;
-}
-.card {
-    background-color: #1c1f26;
-    padding: 15px;
-    border-radius: 12px;
-    margin-bottom: 10px;
-}
-.stTextInput>div>div>input {
-    background-color: #1c1f26;
-    color: white;
-}
-</style>
-""", unsafe_allow_html=True)
+        score = int((completion_rate*0.5 + on_time_rate*0.3 + min(focus_hours/10,1)*0.2)*100)
 
-# -------------------- SIDEBAR --------------------
-menu = st.sidebar.radio("Navigation", ["🏠 Today", "📊 Dashboard", "🔁 Habits", "🧠 Insights"])
+        col1,col2,col3 = st.columns(3)
+        col1.metric("🔥 Productivity Score", score)
+        col2.metric("✅ Completed Tasks", completed)
+        col3.metric("⏱ Focus Hours", round(focus_hours,2))
 
-df = load_data()
+        tasks["priority_score"] = tasks.apply(priority_score, axis=1)
+        top_tasks = tasks.sort_values("priority_score", ascending=False).head(5)
 
-# -------------------- FAST INPUT --------------------
-st.markdown("### ⚡ Quick Add Task")
+        st.subheader("🔥 Do Now")
+        st.dataframe(top_tasks[["title","priority","deadline","priority_score"]])
 
-col1, col2, col3, col4 = st.columns([4,1,1,1])
+        # Burnout Detection
+        if total > 8 and completion_rate < 0.5:
+            st.warning("⚠️ High workload detected. Consider reducing tasks.")
 
-with col1:
-    task_input = st.text_input("Task", placeholder="Type and press Enter...")
+# ------------------ TASKS ------------------
+elif page == "Tasks":
+    st.title("✅ Task Manager")
 
-with col2:
-    est_time = st.selectbox("Time", ["15m","30m","1h","2h"])
+    with st.form("task_form"):
+        title = st.text_input("Title")
+        desc = st.text_area("Description")
+        priority = st.selectbox("Priority",["High","Medium","Low"])
+        deadline = st.date_input("Deadline")
+        est_time = st.number_input("Estimated Hours",0.5,24.0,1.0)
+        submit = st.form_submit_button("Add Task")
 
-with col3:
-    deadline = st.date_input("Deadline", value=datetime.now())
+        if submit:
+            new = {
+                "id": len(tasks)+1,
+                "title": title,
+                "desc": desc,
+                "priority": priority,
+                "deadline": deadline,
+                "est_time": est_time,
+                "actual_time": 0,
+                "status": "Pending",
+                "category": categorize(title),
+                "created_at": datetime.now()
+            }
+            tasks = pd.concat([tasks, pd.DataFrame([new])], ignore_index=True)
+            save_data(tasks, habits)
+            st.success("Task Added!")
 
-with col4:
-    add_btn = st.button("➕")
+    st.subheader("Your Tasks")
 
-if add_btn and task_input:
-    new_row = {
-        "ID": len(df)+1,
-        "Task": task_input,
-        "Category": auto_category(task_input),
-        "Priority": "Pending",
-        "Status": "Pending",
-        "Date": datetime.now(),
-        "Deadline": deadline,
-        "Time_Est": est_time,
-        "Time_Spent": 0,
-        "Type": "Task",
-        "Score": 0
-    }
-    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    save_data(df)
-    st.success("Task Added!")
+    for i,row in tasks.iterrows():
+        col1,col2,col3 = st.columns([4,1,1])
+        col1.write(f"**{row['title']}** ({row['category']})")
 
-# -------------------- TODAY --------------------
-if menu == "🏠 Today":
-    st.markdown("## 🔥 Do Next")
+        if col2.button("✔", key=f"done{i}"):
+            tasks.at[i,"status"] = "Done"
+            tasks.at[i,"actual_time"] = row["est_time"]
+            save_data(tasks, habits)
 
-    if not df.empty:
-        df["Priority"] = df.apply(
-            lambda x: compute_priority(x["Deadline"], pd.to_datetime(x["Date"])), axis=1
-        )
+        if col3.button("❌", key=f"del{i}"):
+            tasks = tasks.drop(i)
+            save_data(tasks, habits)
 
-        df_sorted = df.sort_values(by="Priority")
+# ------------------ HABITS ------------------
+elif page == "Habits":
+    st.title("🔁 Habits")
 
-        for i, row in df_sorted.iterrows():
-            with st.container():
-                st.markdown(f"""
-                <div class="card">
-                <b>📝 {row['Task']}</b><br>
-                ⏰ {row['Time_Est']} | 📅 {row['Deadline']} | 🔥 {row['Priority']}
-                </div>
-                """, unsafe_allow_html=True)
+    with st.form("habit_form"):
+        name = st.text_input("Habit Name")
+        submit = st.form_submit_button("Add Habit")
 
-                colA, colB = st.columns(2)
+        if submit:
+            new = {
+                "id": len(habits)+1,
+                "name": name,
+                "streak": 0,
+                "last_done": None,
+                "consistency": 0
+            }
+            habits = pd.concat([habits, pd.DataFrame([new])], ignore_index=True)
+            save_data(tasks, habits)
 
-                if colA.button(f"✅ Done {i}"):
-                    df.at[i, "Status"] = "Completed"
-                    save_data(df)
+    for i,row in habits.iterrows():
+        col1,col2 = st.columns([4,1])
+        col1.write(f"{row['name']} 🔥 {row['streak']}")
 
-                if colB.button(f"▶ Start {i}"):
-                    st.session_state["active_task"] = row["Task"]
+        if col2.button("Done", key=f"habit{i}"):
+            habits.at[i,"streak"] += 1
+            habits.at[i,"last_done"] = datetime.now()
+            save_data(tasks, habits)
 
-# -------------------- DASHBOARD --------------------
-elif menu == "📊 Dashboard":
-    st.markdown("## 📊 Productivity Dashboard")
+# ------------------ PLANNER ------------------
+elif page == "Planner":
+    st.title("📅 Planner")
 
-    if not df.empty:
-        completed = df[df["Status"] == "Completed"]
-        total = len(df)
+    today = datetime.now().date()
+    today_tasks = tasks[pd.to_datetime(tasks["deadline"]).dt.date == today]
 
-        completion_rate = (len(completed)/total)*100 if total else 0
+    st.write("### Today's Tasks")
+    st.dataframe(today_tasks[["title","priority","status"]])
 
-        st.metric("Completion Rate", f"{completion_rate:.2f}%")
+# ------------------ INSIGHTS ------------------
+elif page == "Insights":
+    st.title("📈 Insights")
 
-        fig = px.histogram(df, x="Category", title="Category Distribution")
-        st.plotly_chart(fig, use_container_width=True)
+    if len(tasks) > 0:
+        fig = px.histogram(tasks, x="category")
+        st.plotly_chart(fig)
 
-# -------------------- HABITS --------------------
-elif menu == "🔁 Habits":
-    st.markdown("## 🔁 Habit Tracker")
+        status_fig = px.pie(tasks, names="status")
+        st.plotly_chart(status_fig)
 
-    habit = st.text_input("Add Habit")
+# ------------------ AI REVIEW ------------------
+elif page == "AI Review":
+    st.title("🧠 Weekly Review")
 
-    if st.button("Add Habit"):
-        new_row = {
-            "ID": len(df)+1,
-            "Task": habit,
-            "Category": "Habit",
-            "Priority": "Optional",
-            "Status": "Pending",
-            "Date": datetime.now(),
-            "Deadline": None,
-            "Time_Est": "15m",
-            "Time_Spent": 0,
-            "Type": "Habit",
-            "Score": 0
-        }
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        save_data(df)
+    if st.button("Generate Review"):
+        completed = len(tasks[tasks["status"]=="Done"])
+        total = len(tasks)
 
-# -------------------- INSIGHTS --------------------
-elif menu == "🧠 Insights":
-    st.markdown("## 🧠 Smart Insights")
+        st.write("### 📌 Summary")
+        st.write(f"- Completed {completed}/{total} tasks")
 
-    if not df.empty:
-        pending = len(df[df["Status"] == "Pending"])
+        if completed/total > 0.7:
+            st.success("🔥 Great productivity this week!")
+        else:
+            st.warning("⚠️ Try improving consistency.")
 
-        if pending > 10:
-            st.warning("⚠️ High workload detected! Possible burnout risk.")
-
-        st.info("📊 Weekly Review (Basic)")
-        st.write(f"Total Tasks: {len(df)}")
-        st.write(f"Completed: {len(df[df['Status']=='Completed'])}")
-
-# -------------------- POMODORO --------------------
-st.markdown("## ⏱️ Pomodoro Timer")
-
-if "timer" not in st.session_state:
-    st.session_state.timer = 25 * 60
-
-col1, col2 = st.columns(2)
-
-if col1.button("Start Pomodoro"):
-    for i in range(st.session_state.timer, 0, -1):
-        mins, secs = divmod(i, 60)
-        timer_display = f"{mins:02d}:{secs:02d}"
-        st.write(timer_display)
-        time.sleep(1)
-
-if col2.button("Reset"):
-    st.session_state.timer = 25 * 60
+        st.write("### 💡 Suggestions")
+        st.write("- Reduce overload")
+        st.write("- Focus on high priority tasks")
+        st.write("- Maintain habit streaks")

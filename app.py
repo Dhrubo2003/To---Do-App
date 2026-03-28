@@ -1,57 +1,79 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import plotly.express as px
-import os
+import gspread
+from google.oauth2.service_account import Credentials
 
+# ------------------ PAGE CONFIG ------------------
 st.set_page_config(page_title="Productivity OS", layout="wide")
 
-FILE = "data.xlsx"
+# ------------------ DARK UI ------------------
+st.markdown("""
+    <style>
+    body {background-color: #0e1117; color: white;}
+    .stApp {background-color: #0e1117;}
+    .css-1d391kg {background-color: #111827;}
+    .card {
+        padding: 15px;
+        border-radius: 12px;
+        background-color: #1f2937;
+        margin-bottom: 10px;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# ------------------ INIT EXCEL ------------------
-def init_file():
-    if not os.path.exists(FILE):
-        tasks = pd.DataFrame(columns=[
-            "id","title","desc","priority","deadline",
-            "est_time","actual_time","status",
-            "category","created_at"
-        ])
-        habits = pd.DataFrame(columns=[
-            "id","name","streak","last_done","consistency"
-        ])
-        with pd.ExcelWriter(FILE) as writer:
-            tasks.to_excel(writer, sheet_name="tasks", index=False)
-            habits.to_excel(writer, sheet_name="habits", index=False)
+# ------------------ GOOGLE SHEETS CONNECT ------------------
+@st.cache_resource
+def connect_sheet():
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ],
+    )
+    client = gspread.authorize(creds)
+    return client
+
+client = connect_sheet()
+
+SHEET_NAME = "ProductivityOS_Data"
 
 def load_data():
-    tasks = pd.read_excel(FILE, sheet_name="tasks")
-    habits = pd.read_excel(FILE, sheet_name="habits")
+    sheet = client.open(SHEET_NAME)
+    tasks = pd.DataFrame(sheet.worksheet("tasks").get_all_records())
+    habits = pd.DataFrame(sheet.worksheet("habits").get_all_records())
     return tasks, habits
 
-def save_data(tasks, habits):
-    with pd.ExcelWriter(FILE, engine='openpyxl', mode='w') as writer:
-        tasks.to_excel(writer, sheet_name="tasks", index=False)
-        habits.to_excel(writer, sheet_name="habits", index=False)
+def save_tasks(df):
+    sheet = client.open(SHEET_NAME).worksheet("tasks")
+    sheet.clear()
+    sheet.update([df.columns.values.tolist()] + df.values.tolist())
 
-init_file()
+def save_habits(df):
+    sheet = client.open(SHEET_NAME).worksheet("habits")
+    sheet.clear()
+    sheet.update([df.columns.values.tolist()] + df.values.tolist())
+
 tasks, habits = load_data()
 
 # ------------------ SIDEBAR ------------------
 st.sidebar.title("⚡ Productivity OS")
-page = st.sidebar.radio("Navigate", [
-    "Dashboard","Tasks","Habits","Planner","Insights","AI Review"
-])
+page = st.sidebar.radio("", ["Dashboard","Tasks","Habits","Insights","AI Review"])
 
 # ------------------ HELPERS ------------------
-
 def priority_score(row):
-    if pd.isna(row["deadline"]):
-        return 0
-    days_left = (pd.to_datetime(row["deadline"]) - datetime.now()).days
-    urgency = max(0, 10 - days_left)
-    importance = {"High":10,"Medium":5,"Low":2}.get(row["priority"],5)
-    effort = row["est_time"] if not pd.isna(row["est_time"]) else 1
+    try:
+        days_left = (pd.to_datetime(row["deadline"]) - datetime.now()).days
+        urgency = max(0, 10 - days_left)
+    except:
+        urgency = 5
+
+    importance = {"High":10,"Medium":5,"Low":2}.get(row.get("priority","Medium"),5)
+    effort = row.get("est_time",1)
+
     return urgency*0.4 + importance*0.3 - effort*0.2
 
 def categorize(text):
@@ -69,143 +91,128 @@ if page == "Dashboard":
     st.title("📊 Dashboard")
 
     if len(tasks) > 0:
+        tasks["status"] = tasks["status"].fillna("Pending")
+
         completed = len(tasks[tasks["status"]=="Done"])
         total = len(tasks)
-        completion_rate = completed/total if total>0 else 0
 
-        on_time = len(tasks[(tasks["status"]=="Done") & 
-                   (pd.to_datetime(tasks["deadline"]) >= pd.to_datetime(tasks["created_at"]))])
-        on_time_rate = on_time/total if total>0 else 0
+        completion_rate = completed / total if total else 0
+        focus_hours = pd.to_numeric(tasks["actual_time"], errors='coerce').sum()
 
-        focus_hours = tasks["actual_time"].sum() if "actual_time" in tasks else 0
+        score = int((completion_rate*0.6 + min(focus_hours/10,1)*0.4)*100)
 
-        score = int((completion_rate*0.5 + on_time_rate*0.3 + min(focus_hours/10,1)*0.2)*100)
-
-        col1,col2,col3 = st.columns(3)
-        col1.metric("🔥 Productivity Score", score)
-        col2.metric("✅ Completed Tasks", completed)
-        col3.metric("⏱ Focus Hours", round(focus_hours,2))
+        col1, col2, col3 = st.columns(3)
+        col1.metric("🔥 Score", score)
+        col2.metric("✅ Completed", completed)
+        col3.metric("⏱ Hours", round(focus_hours,2))
 
         tasks["priority_score"] = tasks.apply(priority_score, axis=1)
-        top_tasks = tasks.sort_values("priority_score", ascending=False).head(5)
+        top = tasks.sort_values("priority_score", ascending=False).head(5)
 
         st.subheader("🔥 Do Now")
-        st.dataframe(top_tasks[["title","priority","deadline","priority_score"]])
+        st.dataframe(top[["title","priority","deadline","priority_score"]])
 
         # Burnout Detection
         if total > 8 and completion_rate < 0.5:
-            st.warning("⚠️ High workload detected. Consider reducing tasks.")
+            st.warning("⚠️ You're overloaded. Reduce tasks.")
 
 # ------------------ TASKS ------------------
 elif page == "Tasks":
-    st.title("✅ Task Manager")
+    st.title("✅ Tasks")
 
-    with st.form("task_form"):
+    with st.form("add_task"):
         title = st.text_input("Title")
         desc = st.text_area("Description")
         priority = st.selectbox("Priority",["High","Medium","Low"])
         deadline = st.date_input("Deadline")
-        est_time = st.number_input("Estimated Hours",0.5,24.0,1.0)
+        est_time = st.number_input("Est Hours",0.5,24.0,1.0)
         submit = st.form_submit_button("Add Task")
 
         if submit:
-            new = {
+            new = pd.DataFrame([{
                 "id": len(tasks)+1,
                 "title": title,
                 "desc": desc,
                 "priority": priority,
-                "deadline": deadline,
+                "deadline": str(deadline),
                 "est_time": est_time,
                 "actual_time": 0,
                 "status": "Pending",
                 "category": categorize(title),
-                "created_at": datetime.now()
-            }
-            tasks = pd.concat([tasks, pd.DataFrame([new])], ignore_index=True)
-            save_data(tasks, habits)
+                "created_at": str(datetime.now())
+            }])
+            tasks = pd.concat([tasks, new], ignore_index=True)
+            save_tasks(tasks)
             st.success("Task Added!")
-
-    st.subheader("Your Tasks")
 
     for i,row in tasks.iterrows():
         col1,col2,col3 = st.columns([4,1,1])
-        col1.write(f"**{row['title']}** ({row['category']})")
+        col1.markdown(f"**{row['title']}** ({row['category']})")
 
         if col2.button("✔", key=f"done{i}"):
             tasks.at[i,"status"] = "Done"
-            tasks.at[i,"actual_time"] = row["est_time"]
-            save_data(tasks, habits)
+            tasks.at[i,"actual_time"] = row.get("est_time",1)
+            save_tasks(tasks)
 
         if col3.button("❌", key=f"del{i}"):
             tasks = tasks.drop(i)
-            save_data(tasks, habits)
+            save_tasks(tasks)
 
 # ------------------ HABITS ------------------
 elif page == "Habits":
     st.title("🔁 Habits")
 
-    with st.form("habit_form"):
+    with st.form("habit"):
         name = st.text_input("Habit Name")
-        submit = st.form_submit_button("Add Habit")
+        submit = st.form_submit_button("Add")
 
         if submit:
-            new = {
+            new = pd.DataFrame([{
                 "id": len(habits)+1,
                 "name": name,
                 "streak": 0,
-                "last_done": None,
+                "last_done": "",
                 "consistency": 0
-            }
-            habits = pd.concat([habits, pd.DataFrame([new])], ignore_index=True)
-            save_data(tasks, habits)
+            }])
+            habits = pd.concat([habits, new], ignore_index=True)
+            save_habits(habits)
 
     for i,row in habits.iterrows():
         col1,col2 = st.columns([4,1])
         col1.write(f"{row['name']} 🔥 {row['streak']}")
 
-        if col2.button("Done", key=f"habit{i}"):
+        if col2.button("Done", key=f"h{i}"):
             habits.at[i,"streak"] += 1
-            habits.at[i,"last_done"] = datetime.now()
-            save_data(tasks, habits)
-
-# ------------------ PLANNER ------------------
-elif page == "Planner":
-    st.title("📅 Planner")
-
-    today = datetime.now().date()
-    today_tasks = tasks[pd.to_datetime(tasks["deadline"]).dt.date == today]
-
-    st.write("### Today's Tasks")
-    st.dataframe(today_tasks[["title","priority","status"]])
+            habits.at[i,"last_done"] = str(datetime.now())
+            save_habits(habits)
 
 # ------------------ INSIGHTS ------------------
 elif page == "Insights":
     st.title("📈 Insights")
 
     if len(tasks) > 0:
-        fig = px.histogram(tasks, x="category")
-        st.plotly_chart(fig)
+        fig1 = px.histogram(tasks, x="category")
+        st.plotly_chart(fig1, use_container_width=True)
 
-        status_fig = px.pie(tasks, names="status")
-        st.plotly_chart(status_fig)
+        fig2 = px.pie(tasks, names="status")
+        st.plotly_chart(fig2, use_container_width=True)
 
 # ------------------ AI REVIEW ------------------
 elif page == "AI Review":
     st.title("🧠 Weekly Review")
 
-    if st.button("Generate Review"):
+    if st.button("Generate"):
         completed = len(tasks[tasks["status"]=="Done"])
         total = len(tasks)
 
-        st.write("### 📌 Summary")
-        st.write(f"- Completed {completed}/{total} tasks")
+        st.write(f"Completed {completed}/{total} tasks")
 
-        if completed/total > 0.7:
-            st.success("🔥 Great productivity this week!")
+        if total > 0 and completed/total > 0.7:
+            st.success("🔥 Great week!")
         else:
-            st.warning("⚠️ Try improving consistency.")
+            st.warning("⚠️ Improve consistency")
 
-        st.write("### 💡 Suggestions")
-        st.write("- Reduce overload")
-        st.write("- Focus on high priority tasks")
-        st.write("- Maintain habit streaks")
+        st.write("💡 Suggestions:")
+        st.write("- Focus on high priority")
+        st.write("- Avoid overload")
+        st.write("- Maintain habits")

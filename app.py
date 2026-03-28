@@ -78,6 +78,7 @@ def save_habits(df):
 tasks, habits = load_data()
 
 # ---------------- SIDEBAR ----------------
+st.sidebar.title("⚡ Productivity OS")
 page = st.sidebar.radio("Navigation", ["Tasks","Analytics","Habits","AI Review","Data Preview"])
 
 # ---------------- HELPERS ----------------

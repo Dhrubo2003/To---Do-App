@@ -1,6 +1,6 @@
 streamlit
 pandas
-openpyxl
-plotly
-datetime
 numpy
+plotly
+gspread
+google-auth
